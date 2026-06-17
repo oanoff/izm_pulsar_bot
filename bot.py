@@ -176,15 +176,15 @@ async def process_meter_selection(callback: CallbackQuery, state: FSMContext):
     await state.update_data(**{key: data[key]})
     builder = InlineKeyboardBuilder()
     builder.button(
-        text=f"{'✅' if data['hvs'] else '⬜'} ХВС",
+        text=f"{'✅' if data['hvs'] else '❄️'} ХВС",
         callback_data="meter_hvs"
     )
     builder.button(
-        text=f"{'✅' if data['gvs'] else '⬜'} ГВС",
+        text=f"{'✅' if data['gvs'] else '🔥'} ГВС",
         callback_data="meter_gvs"
     )
     builder.button(
-        text=f"{'✅' if data['heat'] else '⬜'} Тепло",
+        text=f"{'✅' if data['heat'] else '🌡️'} Тепло",
         callback_data="meter_heat"
     )
     builder.button(text="✅ Готово", callback_data="meter_done")
