@@ -1,7 +1,6 @@
 import asyncio
 import csv
 import os
-import io
 from datetime import datetime
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
@@ -12,47 +11,75 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# Загрузка переменных окружения
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Не задан BOT_TOKEN в .env файле")
 
-# ID администратора (только этот пользователь сможет видеть данные)
-ADMIN_ID = 5573362  # Ваш Telegram ID
+ADMIN_ID = 5573362
 
-# Инициализация бота и диспетчера
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage)
 
-# Путь к CSV-файлу
 CSV_FILE = "data.csv"
 
-# Определение состояний FSM
+# Новые заголовки (порядок: дата, фио, квартира, телефон, хвс, гвс, тепло, подъезд, этаж, email)
+EXPECTED_HEADERS = [
+    "Дата/время",
+    "ФИО",
+    "Номер квартиры",
+    "Номер телефона",
+    "ХВС",
+    "ГВС",
+    "Тепло",
+    "Подъезд",
+    "Этаж",
+    "Email"
+]
+
 class SurveyStates(StatesGroup):
     waiting_fullname = State()
     waiting_apartment = State()
+    waiting_entrance = State()
+    waiting_floor = State()
     waiting_phone = State()
+    waiting_email = State()
     waiting_meters = State()
     confirm = State()
 
-# Инициализация CSV с заголовками
+# --- Миграция CSV (если заголовки устарели) ---
+def migrate_csv():
+    if not os.path.exists(CSV_FILE):
+        return
+    with open(CSV_FILE, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        rows = list(reader)
+    if not rows:
+        return
+    headers = rows[0]
+    if len(headers) >= len(EXPECTED_HEADERS):
+        return  # уже актуально
+    # Добавляем недостающие столбцы в конец каждой строки
+    new_rows = []
+    new_rows.append(EXPECTED_HEADERS)
+    for row in rows[1:]:
+        # дополняем до нужной длины пустыми строками
+        while len(row) < len(EXPECTED_HEADERS):
+            row.append("")
+        new_rows.append(row)
+    with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerows(new_rows)
+
 def init_csv():
     if not os.path.exists(CSV_FILE):
         with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "Дата/время",
-                "ФИО",
-                "Номер квартиры",
-                "Номер телефона",
-                "ХВС",
-                "ГВС",
-                "Тепло"
-            ])
+            writer.writerow(EXPECTED_HEADERS)
+    else:
+        migrate_csv()
 
-# Сохранение данных
 def save_to_csv(data):
     with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -63,10 +90,12 @@ def save_to_csv(data):
             data["phone"],
             "Да" if data["hvs"] else "Нет",
             "Да" if data["gvs"] else "Нет",
-            "Да" if data["heat"] else "Нет"
+            "Да" if data["heat"] else "Нет",
+            data.get("entrance", ""),
+            data.get("floor", ""),
+            data.get("email", "")
         ])
 
-# Чтение всех записей из CSV
 def read_all_records():
     if not os.path.exists(CSV_FILE):
         return []
@@ -75,26 +104,24 @@ def read_all_records():
         rows = list(reader)
     return rows
 
-# Получение статистики
 def get_stats():
     rows = read_all_records()
     if len(rows) <= 1:
         return 0, 0, 0, 0
-    data_rows = rows[1:]  # без заголовка
+    data_rows = rows[1:]
     total = len(data_rows)
-    hvs = sum(1 for r in data_rows if r[4] == "Да")
-    gvs = sum(1 for r in data_rows if r[5] == "Да")
-    heat = sum(1 for r in data_rows if r[6] == "Да")
+    hvs = sum(1 for r in data_rows if len(r) > 4 and r[4] == "Да")
+    gvs = sum(1 for r in data_rows if len(r) > 5 and r[5] == "Да")
+    heat = sum(1 for r in data_rows if len(r) > 6 and r[6] == "Да")
     return total, hvs, gvs, heat
 
-# Команда /start
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "🏠 Добро пожаловать! Мы помогаем жителям нашего дома организовать поверку счётчиков ХВС, ГВС и Тепла.\n"
         "Адрес: Измайловский проезд, 5А\n\n"
-        "Чтобы мы могли подготовить коллективную заявку, пожалуйста, ответьте на несколько вопросов.\n\n "
+        "Чтобы мы могли подготовить коллективную заявку, пожалуйста, ответьте на несколько вопросов.\n\n"
         "Введите ваше ФИО (полностью):",
         reply_markup=ReplyKeyboardRemove()
     )
@@ -117,6 +144,26 @@ async def process_apartment(message: Message, state: FSMContext):
         await message.answer("Номер квартиры должен состоять только из цифр. Попробуйте ещё раз:")
         return
     await state.update_data(apartment=apartment)
+    await message.answer("Введите номер вашего подъезда (цифрами):")
+    await state.set_state(SurveyStates.waiting_entrance)
+
+@dp.message(SurveyStates.waiting_entrance)
+async def process_entrance(message: Message, state: FSMContext):
+    entrance = message.text.strip()
+    if not entrance.isdigit():
+        await message.answer("Номер подъезда должен состоять только из цифр. Попробуйте ещё раз:")
+        return
+    await state.update_data(entrance=entrance)
+    await message.answer("Введите номер вашего этажа (цифрами):")
+    await state.set_state(SurveyStates.waiting_floor)
+
+@dp.message(SurveyStates.waiting_floor)
+async def process_floor(message: Message, state: FSMContext):
+    floor = message.text.strip()
+    if not floor.isdigit():
+        await message.answer("Номер этажа должен состоять только из цифр. Попробуйте ещё раз:")
+        return
+    await state.update_data(floor=floor)
     await message.answer("Введите ваш номер телефона (в формате +7XXXXXXXXXX):")
     await state.set_state(SurveyStates.waiting_phone)
 
@@ -127,6 +174,16 @@ async def process_phone(message: Message, state: FSMContext):
         await message.answer("Пожалуйста, введите номер в международном формате, например +79001234567:")
         return
     await state.update_data(phone=phone)
+    await message.answer("Введите ваш адрес электронной почты (для отправки чека и документов):")
+    await state.set_state(SurveyStates.waiting_email)
+
+@dp.message(SurveyStates.waiting_email)
+async def process_email(message: Message, state: FSMContext):
+    email = message.text.strip()
+    if not email or '@' not in email:
+        await message.answer("Пожалуйста, введите корректный email (например, example@mail.ru):")
+        return
+    await state.update_data(email=email)
     builder = InlineKeyboardBuilder()
     builder.button(text="❄️ ХВС", callback_data="meter_hvs")
     builder.button(text="🔥 ГВС", callback_data="meter_gvs")
@@ -155,7 +212,10 @@ async def process_meter_selection(callback: CallbackQuery, state: FSMContext):
             f"📋 Проверьте введённые данные:\n"
             f"ФИО: {data['fullname']}\n"
             f"Квартира: {data['apartment']}\n"
+            f"Подъезд: {data['entrance']}\n"
+            f"Этаж: {data['floor']}\n"
             f"Телефон: {data['phone']}\n"
+            f"Email: {data['email']}\n"
             f"ХВС: {'Да' if data['hvs'] else 'Нет'}\n"
             f"ГВС: {'Да' if data['gvs'] else 'Нет'}\n"
             f"Тепло: {'Да' if data['heat'] else 'Нет'}\n\n"
@@ -218,7 +278,14 @@ async def process_confirm(message: Message, state: FSMContext):
     else:
         await message.answer("Пожалуйста, нажмите кнопку «Да» или «Нет».")
 
-@dp.message(StateFilter(SurveyStates.waiting_fullname, SurveyStates.waiting_apartment, SurveyStates.waiting_phone))
+@dp.message(StateFilter(
+    SurveyStates.waiting_fullname,
+    SurveyStates.waiting_apartment,
+    SurveyStates.waiting_entrance,
+    SurveyStates.waiting_floor,
+    SurveyStates.waiting_phone,
+    SurveyStates.waiting_email
+))
 async def handle_incorrect_input(message: Message, state: FSMContext):
     await message.answer("Пожалуйста, следуйте инструкциям и введите запрашиваемые данные.")
 
@@ -271,9 +338,23 @@ async def admin_actions(callback: CallbackQuery):
             return
         output = "📋 *Последние 20 записей:*\n\n"
         for row in reversed(last_20):
+            # безопасно получаем значения (если строка короче 10, подставляем пустую строку)
+            date = row[0] if len(row) > 0 else ""
+            name = row[1] if len(row) > 1 else ""
+            apt = row[2] if len(row) > 2 else ""
+            phone = row[3] if len(row) > 3 else ""
+            hvs = row[4] if len(row) > 4 else ""
+            gvs = row[5] if len(row) > 5 else ""
+            heat = row[6] if len(row) > 6 else ""
+            entrance = row[7] if len(row) > 7 else ""
+            floor = row[8] if len(row) > 8 else ""
+            email = row[9] if len(row) > 9 else ""
             output += (
-                f"📅 {row[0]} | {row[1]} | кв.{row[2]} | {row[3]}\n"
-                f"   ХВС:{row[4]} ГВС:{row[5]} Тепло:{row[6]}\n\n"
+                f"📅 {date} | {name} | кв.{apt}"
+                f"{' (п.' + entrance + ')' if entrance else ''}"
+                f"{' эт.' + floor if floor else ''}\n"
+                f"   Тел.: {phone} | Email: {email if email else '—'}\n"
+                f"   ХВС:{hvs} ГВС:{gvs} Тепло:{heat}\n\n"
             )
         if len(output) > 4000:
             output = output[:4000] + "\n... (обрезано)"
