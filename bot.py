@@ -16,7 +16,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Не задан BOT_TOKEN в .env файле")
 
-ADMIN_ID = 5573362
+# Список администраторов (добавьте сюда все ID, кому нужен доступ)
+ADMIN_IDS = [5573362, 298826270]
 
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
@@ -24,7 +25,6 @@ dp = Dispatcher(storage=storage)
 
 CSV_FILE = "data.csv"
 
-# Новые заголовки (порядок: дата, фио, квартира, телефон, хвс, гвс, тепло, подъезд, этаж, email)
 EXPECTED_HEADERS = [
     "Дата/время",
     "ФИО",
@@ -48,7 +48,6 @@ class SurveyStates(StatesGroup):
     waiting_meters = State()
     confirm = State()
 
-# --- Миграция CSV (если заголовки устарели) ---
 def migrate_csv():
     if not os.path.exists(CSV_FILE):
         return
@@ -59,12 +58,10 @@ def migrate_csv():
         return
     headers = rows[0]
     if len(headers) >= len(EXPECTED_HEADERS):
-        return  # уже актуально
-    # Добавляем недостающие столбцы в конец каждой строки
+        return
     new_rows = []
     new_rows.append(EXPECTED_HEADERS)
     for row in rows[1:]:
-        # дополняем до нужной длины пустыми строками
         while len(row) < len(EXPECTED_HEADERS):
             row.append("")
         new_rows.append(row)
@@ -293,7 +290,7 @@ async def handle_incorrect_input(message: Message, state: FSMContext):
 
 @dp.message(Command("admin"))
 async def admin_cmd(message: Message):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_IDS:
         await message.answer("⛔ У вас нет доступа к этой команде.")
         return
 
@@ -311,7 +308,7 @@ async def admin_cmd(message: Message):
 
 @dp.callback_query(F.data.startswith("admin_"))
 async def admin_actions(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("⛔ Доступ запрещён.", show_alert=True)
         await callback.message.delete_reply_markup()
         return
@@ -325,42 +322,52 @@ async def admin_actions(callback: CallbackQuery):
         return
 
     if action == "show":
-        rows = read_all_records()
-        if len(rows) <= 1:
-            await callback.message.answer("📭 Нет сохранённых записей.")
+        try:
+            rows = read_all_records()
+            if len(rows) <= 1:
+                await callback.message.answer("📭 Нет сохранённых записей.")
+                await callback.answer()
+                return
+            data_rows = rows[1:]
+            last_20 = data_rows[-20:]
+            if not last_20:
+                await callback.message.answer("Нет записей.")
+                await callback.answer()
+                return
+
+            output = "📋 Последние 20 записей:\n\n"
+            for row in reversed(last_20):
+                date = row[0] if len(row) > 0 else ""
+                name = row[1] if len(row) > 1 else ""
+                apt = row[2] if len(row) > 2 else ""
+                phone = row[3] if len(row) > 3 else ""
+                hvs = row[4] if len(row) > 4 else ""
+                gvs = row[5] if len(row) > 5 else ""
+                heat = row[6] if len(row) > 6 else ""
+                entrance = row[7] if len(row) > 7 else ""
+                floor = row[8] if len(row) > 8 else ""
+                email = row[9] if len(row) > 9 else ""
+
+                line = f"{date} | {name} | кв.{apt}"
+                if entrance:
+                    line += f" (п.{entrance})"
+                if floor:
+                    line += f" эт.{floor}"
+                line += f"\n   Тел.: {phone} | Email: {email if email else '—'}"
+                line += f"\n   ХВС:{hvs} ГВС:{gvs} Тепло:{heat}\n\n"
+                output += line
+
+                if len(output) > 3900:
+                    output += "\n... (показаны не все записи, скачайте CSV)"
+                    break
+
+            await callback.message.delete_reply_markup()
+            await callback.message.answer(output)
             await callback.answer()
-            return
-        data_rows = rows[1:]
-        last_20 = data_rows[-20:]
-        if not last_20:
-            await callback.message.answer("Нет записей.")
+
+        except Exception as e:
+            await callback.message.answer(f"❌ Ошибка при формировании списка:\n{str(e)}")
             await callback.answer()
-            return
-        output = "📋 *Последние 20 записей:*\n\n"
-        for row in reversed(last_20):
-            # безопасно получаем значения (если строка короче 10, подставляем пустую строку)
-            date = row[0] if len(row) > 0 else ""
-            name = row[1] if len(row) > 1 else ""
-            apt = row[2] if len(row) > 2 else ""
-            phone = row[3] if len(row) > 3 else ""
-            hvs = row[4] if len(row) > 4 else ""
-            gvs = row[5] if len(row) > 5 else ""
-            heat = row[6] if len(row) > 6 else ""
-            entrance = row[7] if len(row) > 7 else ""
-            floor = row[8] if len(row) > 8 else ""
-            email = row[9] if len(row) > 9 else ""
-            output += (
-                f"📅 {date} | {name} | кв.{apt}"
-                f"{' (п.' + entrance + ')' if entrance else ''}"
-                f"{' эт.' + floor if floor else ''}\n"
-                f"   Тел.: {phone} | Email: {email if email else '—'}\n"
-                f"   ХВС:{hvs} ГВС:{gvs} Тепло:{heat}\n\n"
-            )
-        if len(output) > 4000:
-            output = output[:4000] + "\n... (обрезано)"
-        await callback.message.delete_reply_markup()
-        await callback.message.answer(output, parse_mode="Markdown")
-        await callback.answer()
         return
 
     if action == "download":
@@ -381,14 +388,14 @@ async def admin_actions(callback: CallbackQuery):
     if action == "stats":
         total, hvs, gvs, heat = get_stats()
         stats_text = (
-            f"📊 *Статистика*\n\n"
+            f"📊 Статистика\n\n"
             f"👥 Всего заявок: {total}\n"
             f"❄️ ХВС: {hvs}\n"
             f"🔥 ГВС: {gvs}\n"
             f"🌡️ Тепло: {heat}"
         )
         await callback.message.delete_reply_markup()
-        await callback.message.answer(stats_text, parse_mode="Markdown")
+        await callback.message.answer(stats_text)
         await callback.answer()
         return
 
