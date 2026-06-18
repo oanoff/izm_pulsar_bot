@@ -16,7 +16,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Не задан BOT_TOKEN в .env файле")
 
-# Список администраторов (добавьте сюда все ID, кому нужен доступ)
+# Список администраторов
 ADMIN_IDS = [5573362, 298826270]
 
 storage = MemoryStorage()
@@ -48,6 +48,7 @@ class SurveyStates(StatesGroup):
     waiting_meters = State()
     confirm = State()
 
+# ----- Функции работы с CSV -----
 def migrate_csv():
     if not os.path.exists(CSV_FILE):
         return
@@ -56,11 +57,9 @@ def migrate_csv():
         rows = list(reader)
     if not rows:
         return
-    headers = rows[0]
-    if len(headers) >= len(EXPECTED_HEADERS):
+    if len(rows[0]) >= len(EXPECTED_HEADERS):
         return
-    new_rows = []
-    new_rows.append(EXPECTED_HEADERS)
+    new_rows = [EXPECTED_HEADERS]
     for row in rows[1:]:
         while len(row) < len(EXPECTED_HEADERS):
             row.append("")
@@ -112,18 +111,51 @@ def get_stats():
     heat = sum(1 for r in data_rows if len(r) > 6 and r[6] == "Да")
     return total, hvs, gvs, heat
 
+# ----- Функция показа админ-меню (вынесена для переиспользования) -----
+async def show_admin_menu(message: Message):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Последние 20 записей", callback_data="admin_show")
+    builder.button(text="📥 Скачать все данные (CSV)", callback_data="admin_download")
+    builder.button(text="📊 Статистика", callback_data="admin_stats")
+    builder.button(text="❌ Закрыть меню", callback_data="admin_close")
+    builder.adjust(1)
+    await message.answer(
+        "🔐 Админ-панель\n\nВыберите действие:",
+        reply_markup=builder.as_markup()
+    )
+
+# ----- Обработчики команд -----
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(
+    text = (
         "🏠 Добро пожаловать! Мы помогаем жителям нашего дома организовать поверку счётчиков ХВС, ГВС и Тепла.\n"
         "Адрес: Измайловский проезд, 5А\n\n"
         "Чтобы мы могли подготовить коллективную заявку, пожалуйста, ответьте на несколько вопросов.\n\n"
-        "Введите ваше ФИО (полностью):",
-        reply_markup=ReplyKeyboardRemove()
+        "Введите ваше ФИО (полностью):"
     )
+    if message.from_user.id in ADMIN_IDS:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🔐 Перейти в админ-панель", callback_data="go_admin")
+        builder.adjust(1)
+        await message.answer(
+            text + "\n\nВы администратор. Можете сразу перейти в админ-панель.",
+            reply_markup=builder.as_markup()
+        )
+    else:
+        await message.answer(text, reply_markup=ReplyKeyboardRemove())
     await state.set_state(SurveyStates.waiting_fullname)
 
+@dp.callback_query(F.data == "go_admin")
+async def go_admin_callback(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ Доступ запрещён.", show_alert=True)
+        return
+    await callback.message.delete_reply_markup()
+    await show_admin_menu(callback.message)
+    await callback.answer()
+
+# ----- Остальные обработчики опроса (без изменений) -----
 @dp.message(SurveyStates.waiting_fullname)
 async def process_fullname(message: Message, state: FSMContext):
     fullname = message.text.strip()
@@ -286,25 +318,13 @@ async def process_confirm(message: Message, state: FSMContext):
 async def handle_incorrect_input(message: Message, state: FSMContext):
     await message.answer("Пожалуйста, следуйте инструкциям и введите запрашиваемые данные.")
 
-# ============ АДМИН-ФУНКЦИОНАЛ ============
-
+# ----- АДМИН-КОМАНДЫ -----
 @dp.message(Command("admin"))
 async def admin_cmd(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.answer("⛔ У вас нет доступа к этой команде.")
         return
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📋 Последние 20 записей", callback_data="admin_show")
-    builder.button(text="📥 Скачать все данные (CSV)", callback_data="admin_download")
-    builder.button(text="📊 Статистика", callback_data="admin_stats")
-    builder.button(text="❌ Закрыть меню", callback_data="admin_close")
-    builder.adjust(1)
-
-    await message.answer(
-        "🔐 Админ-панель\n\nВыберите действие:",
-        reply_markup=builder.as_markup()
-    )
+    await show_admin_menu(message)
 
 @dp.callback_query(F.data.startswith("admin_"))
 async def admin_actions(callback: CallbackQuery):
@@ -364,9 +384,8 @@ async def admin_actions(callback: CallbackQuery):
             await callback.message.delete_reply_markup()
             await callback.message.answer(output)
             await callback.answer()
-
         except Exception as e:
-            await callback.message.answer(f"❌ Ошибка при формировании списка:\n{str(e)}")
+            await callback.message.answer(f"❌ Ошибка: {str(e)}")
             await callback.answer()
         return
 
@@ -399,7 +418,7 @@ async def admin_actions(callback: CallbackQuery):
         await callback.answer()
         return
 
-# ============ ЗАПУСК ============
+# ----- ЗАПУСК -----
 async def main():
     init_csv()
     await dp.start_polling(bot)
